@@ -1,0 +1,111 @@
+CALL split_column();
+
+#calling the supplied split_column() function to seperate the multi indexed routes in scirt_job into
+#individual elements 
+
+CREATE TABLE IF NOT EXISTS locality (locality_id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, locality_name VARCHAR(45) NOT NULL);
+
+#locality is our most top level table, so it makes sense to start by building this table first
+
+INSERT INTO locality (locality_name)
+SELECT suburb_locality AS locality_name FROM chch_street_address 
+GROUP BY suburb_locality;
+
+#populating all localities from chch_street_address
+
+INSERT INTO locality (locality_name)
+SELECT DISTINCT locality FROM scirt_job
+WHERE locality NOT IN (SELECT locality_name FROM LOCALITY);
+
+#and the ones that were missing from chch_street_address, but present in scirt_job
+
+ALTER TABLE temp_table
+ADD COLUMN route_id INT NOT NULL AUTO_INCREMENT PRIMARY KEY;
+
+ALTER TABLE temp_table
+ADD INDEX (route);
+
+#add an indexible key to the temp_table for later use
+
+CREATE TABLE IF NOT EXISTS route (route_id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, route_name VARCHAR(45) NOT NULL);
+ALTER TABLE route
+ADD KEY (route_name);
+
+INSERT INTO route (route_id, route_name)
+SELECT MIN(temp_table.route_id), temp_table.route
+FROM temp_table
+GROUP BY route;
+
+#route is the next most top level table, so we will build that here
+
+CREATE TABLE IF NOT EXISTS route_section (route_section_id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, locality_id INT NOT NULL, route_id INT NOT NULL);
+
+INSERT INTO route_section(route_section_id, locality_id, route_id)
+SELECT chch_street_address.road_section_id, locality.locality_id, route.route_id
+FROM locality, chch_street_address, route
+WHERE locality.locality_name = chch_street_address.suburb_locality 
+AND chch_street_address.road_name = route.route_name
+GROUP BY chch_street_address.road_section_id;
+
+#route_section has foreign keys from both locality and route, so we populate the table here by matching
+#chch_street_address against both locality and route
+
+CREATE TABLE IF NOT EXISTS address (address_id INT NOT NULL, locality_id INT NOT NULL, 
+address_number INT NOT NULL, route_section_id INT NOT NULL, address_number_suffix VARCHAR(5),
+PRIMARY KEY (address_id),
+FOREIGN KEY (locality_id) REFERENCES locality(locality_id),
+FOREIGN KEY (route_section_id) REFERENCES route_section(route_section_id));
+
+INSERT INTO address (address_ID, locality_id, address_number, route_section_id, address_number_suffix)
+SELECT chch_street_address.address_ID, locality.locality_id, chch_street_address.address_number, 
+route_section.route_section_id, chch_street_address.address_number_suffix
+FROM chch_street_address, locality, route_section
+WHERE chch_street_address.suburb_locality = locality.locality_name
+AND chch_street_address.road_section_id = route_section.route_section_id
+GROUP BY address_ID;
+
+#address is a bottom level table, taking elements from route_section and locality so we populate that here.
+#We also take all supplementary elements from chch_street_address that constitute a particular address
+
+CREATE TABLE IF NOT EXISTS delivery_team (delivery_team_id INT PRIMARY KEY NOT NULL AUTO_INCREMENT,
+delivery_team_name VARCHAR(40),
+KEY (delivery_team_name));
+
+INSERT INTO delivery_team (delivery_team_name)
+SELECT delivery_team FROM scirt_job
+GROUP BY delivery_team;
+
+#Unsure if this was a necessary step but I thought it would be best to create an additional delivery_team
+#table to account for delivery teams being linked to multiple jobs
+
+CREATE TABLE IF NOT EXISTS job (job_id INT NOT NULL, locality_id INT NOT NULL, delivery_team_id INT NOT NULL,
+start_date DATE NOT NULL, end_date DATE NOT NULL,
+PRIMARY KEY (job_id),
+FOREIGN KEY (locality_id) REFERENCES locality(locality_id),
+FOREIGN KEY (delivery_team_id) REFERENCES delivery_team(delivery_team_id));
+
+INSERT INTO job (job_id, locality_id, delivery_team_id, start_date, end_date)
+SELECT scirt_job.job_id, locality.locality_id, delivery_team.delivery_team_id, scirt_job.start_date, scirt_job.end_date
+FROM scirt_job, locality, delivery_team
+WHERE scirt_job.delivery_team = delivery_team.delivery_team_name
+AND scirt_job.locality = locality.locality_name
+GROUP BY job_id;
+
+#The job table is a mid-level table, taking foreign keys from both locality and delivery_team, whilst
+#also supplying a foreign key for job_route. I populated this table by matching scirt_job against
+#delivery_team and scirt_job against locality
+
+CREATE TABLE IF NOT EXISTS job_route (job_route_id INT NOT NULL AUTO_INCREMENT, job_id INT NOT NULL, route_id INT NOT NULL,
+PRIMARY KEY (job_route_id),
+FOREIGN KEY (job_id) REFERENCES job(job_id),
+FOREIGN KEY (route_id) REFERENCES route(route_id));
+
+INSERT INTO job_route (job_id, route_id)
+SELECT temp_table.job_id, route.route_id
+FROM temp_table, route
+WHERE temp_table.job_id > 0
+AND temp_table.route = route.route_name;
+
+#The final entity in my diagram to represent is the job_route table. job_route is a bottom-level
+#table, taking foreign keys from job and route. I populated this table by matching temp_table (using the previously generated
+#route_id) against route.
